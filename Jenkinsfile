@@ -12,6 +12,16 @@ pipeline {
   environment {
     APP_NAME = "payment"
     ARTEFACT_ID = "sockshop-" + "${env.APP_NAME}"
+    DYNATRACEID="${env.DT_ACCOUNTID}"
+    DYNATRACEAPIKEY="${env.DT_API_TOKEN}"
+    NLAPIKEY="${env.NL_WEB_API_KEY}"
+    NL_DT_TAG="app:${env.APP_NAME},environment:dev"
+    OUTPUTSANITYCHECK="$WORKSPACE/infrastructure/sanitycheck.json"
+    NEOLOAD_ASCODEFILE="$WORKSPACE/test/neoload/payment_neoload.yaml"
+    NEOLOAD_ANOMALIEDETECTIONFILE="$WORKSPACE/monspec/payment_anomamlieDection.json"
+    BASICCHECKURI="/health"
+    PAYMENTURI="/paymentAuth"
+    GITORIGIN="neotyslab"
   }
   stages {
     stage('Go build') {
@@ -99,6 +109,17 @@ pipeline {
           }
         }
     }
+    stage('Start NeoLoad infrastructure') {
+
+        steps {
+                container('kubectl') {
+                    script {
+                     sh "kubectl create -f $WORKSPACE/infrastructure/infrastructure/neoload/lg/docker-compose.yml"
+                    }
+                }
+        }
+
+    }
     stage('Run health check in dev') {
       when {
         expression {
@@ -107,29 +128,55 @@ pipeline {
       }
       steps {
         echo "Waiting for the service to start..."
-        sleep 60
+        sleep 300
+        sh "sed -i 's/CHECK_TO_REPLACE/ ${BASICCHECKURI}'  ${NEOLOAD_ASCODEFILE}"
+        sh "sed -i 's/PAYMENT_TO_REPLACE/ ${PAYMENTURI}'  ${NEOLOAD_ASCODEFILE}"
+        sh "sed -i 's/HOST_TO_REPLACE/ ${env.APP_NAME}.dev.svc'  ${NEOLOAD_ASCODEFILE}"
+        sh "sed -i 's/PORT_TO_REPLACE/ 80'  ${NEOLOAD_ASCODEFILE}"
+        sh "sed -i 's/DTID_TO_REPLACE/ ${DYNATRACEID}'  ${NEOLOAD_ASCODEFILE}"
+        sh "sed -i 's/APIKEY_TO_REPLACE/ ${DYNATRACEAPIKEY}'  ${NEOLOAD_ASCODEFILE}"
+        sh "sed -i 's/JSONFILE_TO_REPLACE/ ${NEOLOAD_ANOMALIEDETECTIONFILE}'  ${NEOLOAD_ASCODEFILE}"
+        sh "sed -i 's/TAGS_TO_REPLACE/ ${NL_DT_TAG}'  ${NEOLOAD_ASCODEFILE}"
 
-        container('jmeter') {
-          script {
-            def status = executeJMeter ( 
-              scriptName: 'jmeter/basiccheck.jmx',
-              resultsDir: "HealthCheck_${BUILD_NUMBER}",
-              serverUrl: "${env.APP_NAME}.dev", 
-              serverPort: 80,
-              checkPath: '/health',
-              vuCount: 1,
-              loopCount: 1,
-              LTN: "HealthCheck_${BUILD_NUMBER}",
-              funcValidation: true,
-              avgRtValidation: 0
-            )
-            if (status != 0) {
-              currentBuild.result = 'FAILED'
-              error "Health check in dev failed."
-            }
-          }
+        container('neoload') {
+            script {
+
+                  sh "mkdir -p /home/jenkins/.neotys/neoload"
+                  sh "cp $WORKSPACE/infrastructure/infrastructure/neoload/license.lic /home/jenkins/.neotys/neoload/"
+                  status =sh(script:"/neoload/bin/NeoLoadCmd -project $WORKSPACE/test/neoload/load_template/load_template.nlp ${NEOLOAD_ASCODEFILE} -testResultName HealthCheck_Payment_${BUILD_NUMBER} -description HealthCheck_Payment_${BUILD_NUMBER} -nlweb -L BasicCheck=$WORKSPACE/infrastructure/infrastructure/neoload/lg/remote.txt -L Population_Dynatrace_Integration=$WORKSPACE/infrastructure/infrastructure/neoload/lg/local.txt -nlwebToken $NLAPIKEY -launch BasicCheck -noGUI", returnStatus: true)
+
+                  if (status != 0) {
+                            currentBuild.result = 'FAILED'
+                            error "Health check in dev failed."
+                  }
+             }
         }
       }
+    }
+    stage('Sanity Check') {
+          steps {
+            container('neoload') {
+              script {
+                     status =sh(script:"/neoload/bin/NeoLoadCmd -project $WORKSPACE/test/neoload/load_template/load_template.nlp ${NEOLOAD_ASCODEFILE}  -testResultName DynatraceSanityCheck_Payment_${BUILD_NUMBER} -description DynatraceSanityCheck_Payment_${BUILD_NUMBER} -nlweb -L  Population_Dynatrace_SanityCheck=$WORKSPACE/infrastructure/infrastructure/neoload/lg/local.txt -nlwebToken $NLAPIKEY -variables host=${env.APP_NAME}.dev,port=80 -launch DYNATRACE_SANITYCHECK  -noGUI", returnStatus: true)
+
+                     if (status != 0) {
+                          currentBuild.result = 'FAILED'
+                          error "Health check in dev failed."
+                     }
+               }
+             }
+             container('git') {
+               echo "push ${OUTPUTSANITYCHECK}"
+               //---add the push of the sanity check---
+               withCredentials([usernamePassword(credentialsId: 'git-credentials-acm', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                   sh "git config --global user.email ${env.GITHUB_USER_EMAIL}"
+                   sh "git add ${OUTPUTSANITYCHECK}"
+                   sh "git commit -m 'Update Sanity_Check_${BUILD_NUMBER} ${env.APP_NAME} version ${env.VERSION}'"
+                   sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${env.GITHUB_ORGANIZATION}/payment ${GITORIGIN} master"
+               }
+             }
+
+          }
     }
     stage('Run functional check in dev') {
       when {
@@ -138,25 +185,17 @@ pipeline {
         }
       }
       steps {
-        container('jmeter') {
+        container('neoload') {
           script {
-            def status = executeJMeter (  
-              scriptName: "jmeter/${env.APP_NAME}_load.jmx",
-              resultsDir: "FuncCheck_${BUILD_NUMBER}",
-              serverUrl: "${env.APP_NAME}.dev", 
-              serverPort: 80,
-              checkPath: '/health',
-              vuCount: 1,
-              loopCount: 1,
-              LTN: "FuncCheck_${BUILD_NUMBER}",
-              funcValidation: true,
-              avgRtValidation: 0
-            )
-            if (status != 0) {
-              currentBuild.result = 'FAILED'
-              error "Functional check in dev failed."
-            }
-          }
+
+              status =sh(script:"/neoload/bin/NeoLoadCmd -project $WORKSPACE/test/neoload/load_template/load_template.nlp ${NEOLOAD_ASCODEFILE} -testResultName FuncCheck_Payment_${BUILD_NUMBER} -description FuncCheck_Payment_${BUILD_NUMBER} -nlweb -L CatalogueLoad=$WORKSPACE/infrastructure/infrastructure/neoload/lg/remote.txt -L Population_Dynatrace_Integration=$WORKSPACE/infrastructure/infrastructure/neoload/lg/local.txt -nlwebToken $NLAPIKEY -launch paymentLoadd -noGUI", returnStatus: true)
+
+              if (status != 0) {
+                        currentBuild.result = 'FAILED'
+                        error "Health check in dev failed."
+              }
+
+           }
         }
       }
     }
@@ -190,4 +229,16 @@ pipeline {
       }
     }
   }
+   post {
+            always {
+              container('kubectl') {
+                     script {
+                      echo "delete neoload infrastructure"
+                      sh "kubectl delete svc nl-lg-payment -n cicd"
+                      sh "kubectl delete pod nl-lg-payment -n cicd --grace-period=0 --force"
+                     }
+              }
+            }
+
+          }
 }
