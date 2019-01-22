@@ -18,7 +18,7 @@ pipeline {
     NL_DT_TAG="app:${env.APP_NAME},environment:dev"
     OUTPUTSANITYCHECK="$WORKSPACE/infrastructure/sanitycheck.json"
     NEOLOAD_ASCODEFILE="$WORKSPACE/test/neoload/payment_neoload.yaml"
-    NEOLOAD_ANOMALIEDETECTIONFILE="$WORKSPACE/monspec/payment_anomamlieDection.json"
+    NEOLOAD_ANOMALIEDETECTIONFILE="$WORKSPACE/monspec/payment_anomalieDection.json"
     BASICCHECKURI="health"
     PAYMENTURI="paymentAuth"
     GITORIGIN="neotyslab"
